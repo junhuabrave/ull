@@ -14,15 +14,19 @@ build/%: src/%.cpp include/ull/engine.hpp include/ull/telemetry.hpp | build
 build/test_core: tests/test_core.cpp include/ull/engine.hpp include/ull/telemetry.hpp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@
 
-build/nasdaq_ingress: src/nasdaq_ingress.cpp include/ull/nasdaq/moldudp64.hpp | build
+build/nasdaq_ingress: src/nasdaq_ingress.cpp include/ull/nasdaq/moldudp64.hpp include/ull/nasdaq/itch.hpp include/ull/nasdaq/itch_book.hpp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@
 
 build/test_moldudp64: tests/test_moldudp64.cpp include/ull/nasdaq/moldudp64.hpp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@
 
-test: build/test_core build/test_moldudp64
+build/test_itch: tests/test_itch.cpp include/ull/nasdaq/moldudp64.hpp include/ull/nasdaq/itch.hpp include/ull/nasdaq/itch_book.hpp | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@
+
+test: build/test_core build/test_moldudp64 build/test_itch
 	./build/test_core
 	./build/test_moldudp64
+	./build/test_itch
 
 rtl-test: | build
 	iverilog -g2012 -Wall -s quote_gate_tb -o build/quote_gate_tb rtl/quote_gate.v tests/quote_gate_tb.sv
@@ -36,6 +40,8 @@ sanitize: | build
 	./build/test_sanitize
 	$(CXX) $(CPPFLAGS) -std=c++20 -O1 -g -Wall -Wextra -pthread -fsanitize=address,undefined -fno-omit-frame-pointer tests/test_moldudp64.cpp -o build/test_mold_sanitize
 	./build/test_mold_sanitize
+	$(CXX) $(CPPFLAGS) -std=c++20 -O1 -g -Wall -Wextra -pthread -fsanitize=address,undefined -fno-omit-frame-pointer tests/test_itch.cpp -o build/test_itch_sanitize
+	./build/test_itch_sanitize
 
 clean:
 	rm -rf build

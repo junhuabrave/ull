@@ -77,19 +77,74 @@ session, and latches off on a gap, malformed packet or session mismatch. The
 library does not allocate, copy payloads or use unaligned integer loads. Packet
 views borrow their immutable input buffer; consumers must finish before reuse.
 
-This layer does **not** decode ITCH, verify Ethernet/IP/UDP integrity, open a socket,
-request retransmissions, recover a book, send orders or connect to the toy engine.
+Transport-only mode does **not** decode ITCH, verify Ethernet/IP/UDP integrity,
+open a socket, request retransmissions, recover a book, send orders or connect
+to the toy engine. The optional book-replay mode below adds ITCH processing.
 Mold sequence numbers count all messages in a channel, including other instruments
 and administrative events; do not map them directly to `Engine::on_book`'s
-single-instrument sequence. The next layer needs a separate per-book generation,
-day/session-qualified instrument mapping and trading-state gates. Tests use
-hand-written synthetic wire fixtures, not licensed exchange recordings.
+single-instrument sequence. Book replay maintains a separate per-book generation
+and resets directory mappings explicitly per session. Tests use hand-written
+synthetic wire fixtures, not licensed exchange recordings.
 
 The conservative receiver stops on the first forward gap rather than waiting on
 a redundant channel. It does not automatically resume when late messages arrive.
 An eventual recovery coordinator must rebuild/reconcile state before explicit
 rearming. `transport_ready` is not permission to trade; downstream decode/book
 failure must also disarm the path. Parse validation is not application rollback.
+
+### ITCH displayed-book replay
+
+```sh
+./build/nasdaq_ingress TEST000001 1 --stock AAPL day-start.bin updates.bin
+```
+
+Provide your own raw MoldUDP64 payload files; these example filenames are not
+bundled captures. This mode requires the **complete channel from sequence 1**,
+including the `S/O` Start of Messages event and stock directories. It reconstructs
+one selected symbol, retains channel sequencing across other symbols, and prints
+the final best bid/ask, aggregated shares, live order count and trading-state
+flags. No sockets are opened and no quotes are sent to the toy engine.
+
+- `A/F` add displayed orders; `E/C/X` subtract the message's share quantity;
+  `D` removes the remainder; `U` replaces the ID, quantity and price while retaining
+  side and attribution. Replacement works even when the table is full.
+- ITCH executions are **deltas**, not the cumulative fill quantities accepted by
+  the toy trading engine. A non-printable `C` still reduces displayed shares and
+  its execution price does not reprice the remaining order. `P/Q/B` do not alter
+  the displayed book; a broken trade does not resurrect an executed order.
+- `R` binds the selected symbol to its session-local locate. `H`, Nasdaq-specific
+  `h`, `S` and `W` control the reported trading state; `Y` records Reg SHO status.
+  Missing `H/T` keeps the stock halted. BX/PSX operational halts do not halt the
+  Nasdaq book. The conservative market-wide circuit-breaker latch lasts for the
+  session; a later `H/T` cannot clear it.
+- Every newly delivered message in a datagram is decoded before any is applied.
+  Unknown types, invalid consumed fields, missing/duplicate order IDs, over-sized
+  reductions, directory inconsistencies, gaps or capacity exhaustion invalidate
+  the book. No snapshot, order or depth query is available after a fault. Earlier
+  changes in a state-invalid batch may remain internally, but cannot be published;
+  explicit full day-start replay is required to clear the fault.
+
+Prices are **USD × 10,000**, not instrument ticks; sizes are shares, with 64-bit
+aggregated depth. Exchange timestamps are nanoseconds since midnight, not UTC or
+local receive times. A future trading adapter must handle tick/lot conversion,
+price bands, stale data, reference-market data and all order-specific controls.
+`continuous_trading` reports a conservative market-state predicate only; it is not
+permission to trade, a check for a non-crossed book, or a Reg SHO compliance check.
+
+This is a **bounded reference implementation**: 4,096 live orders for the selected
+symbol in the CLI, open-addressed lookup with bounded probing, and table scans for
+best-price/depth queries. It makes no constant-time or production latency claim
+and is not a FIFO queue-position model. Library capacity is a compile-time bound;
+a live universe needs capture-driven sizing and a production price-level design.
+
+The replay profile requires system events in `O/S/Q/M/E/C` order, one directory
+binding per locate per session, and positive displayed prices/quantities. Known
+non-book types (`L/V/K/J/P/Q/B/I/N/O`) are length/header checked and skipped; their
+full payload semantics are not implemented. Only the selected symbol's orders are
+reconstructed. There is no GLIMPSE import, incremental gap recovery, feed-age
+watchdog, authenticated session/date metadata, full-market validation or licensed
+capture verification yet. Session restart discards the old book; it is not a way
+to resume from an arbitrary multicast packet.
 
 ## What is implemented
 
@@ -221,13 +276,13 @@ Use C++ for the reference model, configuration, replay, reconciliation and slowe
 strategy/control functions. A CPU/NIC kernel-bypass path is a separate engineering
 option whose end-to-end latency must be measured, not inferred from this kernel.
 
-The next milestone is **ITCH decoding and order-book reconstruction** against
-licensed fixtures, including directory/session mapping, halts, executions,
-cancels/replaces and explicit recovery. Follow with OUCH encoding and a session/
-order state machine, reliable execution processing, cancel/rate/self-trade controls
-and persistent reconciliation. Port validated behavior into a complete FPGA
-pipeline with coherent risk ownership and a final transmit gate, then establish
-hardware timing. Do not let CPU and FPGA independently spend the same risk budget.
+The ITCH single-symbol day-start reference is implemented against synthetic wire
+fixtures. **Licensed-capture equivalence and real recovery remain open**. Follow
+with OUCH encoding and a session/order state machine, reliable execution processing,
+cancel/rate/self-trade controls and persistent reconciliation. Port validated
+behavior into a complete FPGA pipeline with coherent risk ownership and a final
+transmit gate, then establish hardware timing. Do not let CPU and FPGA independently
+spend the same risk budget.
 
 The RTL candidate output has no ready/valid backpressure handshake: each valid
 cycle is one advisory candidate that may be discarded. It must never connect
