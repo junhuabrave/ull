@@ -23,10 +23,14 @@ build/test_moldudp64: tests/test_moldudp64.cpp include/ull/nasdaq/moldudp64.hpp 
 build/test_itch: tests/test_itch.cpp include/ull/nasdaq/moldudp64.hpp include/ull/nasdaq/itch.hpp include/ull/nasdaq/itch_book.hpp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@
 
-test: build/test_core build/test_moldudp64 build/test_itch
+build/test_order_entry: tests/test_order_entry.cpp include/ull/nasdaq/ouch.hpp include/ull/nasdaq/soupbintcp.hpp | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@
+
+test: build/test_core build/test_moldudp64 build/test_itch build/test_order_entry
 	./build/test_core
 	./build/test_moldudp64
 	./build/test_itch
+	./build/test_order_entry
 
 rtl-test: | build
 	iverilog -g2012 -Wall -s quote_gate_tb -o build/quote_gate_tb rtl/quote_gate.v tests/quote_gate_tb.sv
@@ -42,6 +46,8 @@ sanitize: | build
 	./build/test_mold_sanitize
 	$(CXX) $(CPPFLAGS) -std=c++20 -O1 -g -Wall -Wextra -pthread -fsanitize=address,undefined -fno-omit-frame-pointer tests/test_itch.cpp -o build/test_itch_sanitize
 	./build/test_itch_sanitize
+	$(CXX) $(CPPFLAGS) -std=c++20 -O1 -g -Wall -Wextra -pthread -fsanitize=address,undefined -fno-omit-frame-pointer tests/test_order_entry.cpp -o build/test_order_entry_sanitize
+	./build/test_order_entry_sanitize
 
 clean:
 	rm -rf build

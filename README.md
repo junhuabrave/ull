@@ -40,6 +40,7 @@ implemented in the single-instrument demo.
 Sources: [Nasdaq ITCH specification](https://www.nasdaqtrader.com/content/technicalsupport/specifications/dataproducts/NQTVITCHSpecification.pdf),
 [OUCH 5.0 specification](https://www.nasdaqtrader.com/content/technicalsupport/specifications/TradingProducts/OUCH5.0.pdf),
 [MoldUDP64 specification](https://www.nasdaqtrader.com/content/technicalsupport/specifications/dataproducts/moldudp64.pdf),
+[SoupBinTCP 3.00 specification](https://www.nasdaqtrader.com/content/technicalsupport/specifications/dataproducts/soupbintcp.pdf),
 [AMD X3522PV product page](https://www.amd.com/en/products/accelerators/alveo/x3/a-x3522pv-p08g-pq-g.html).
 
 ## Run locally
@@ -145,6 +146,68 @@ reconstructed. There is no GLIMPSE import, incremental gap recovery, feed-age
 watchdog, authenticated session/date metadata, full-market validation or licensed
 capture verification yet. Session restart discards the old book; it is not a way
 to resume from an arbitrary multicast packet.
+
+### Offline OUCH encoding and SoupBinTCP sessions
+
+`OuchEncoder` implements Enter, Replace and Cancel against the October 2025
+OUCH 5.0 specification. It returns fixed-size byte arrays, without allocation or
+I/O. Numeric fields are big-endian, prices occupy eight bytes in price4 units,
+and alpha fields are right-padded with spaces. The narrow initial profile is
+principal, displayed, market-hours DAY, non-ISO continuous limit orders with
+explicit `PriceType=L`, `PostOnly=P` and `TradeNow=N` appendages. It supports buys
+and ordinary sells only, not short/exempt sells or arbitrary symbol spellings.
+It requests exchange post-only behavior; it does not implement exchange pricing
+rules or prove that an order cannot execute immediately.
+
+- Enter/replace sizes must be 1–999,999 shares. Prices must be positive and no
+  greater than $199,999.9900; market-order sentinels reject rather than truncate.
+- Replace quantity is the **total chain liability**, including prior executions
+  and self-match-prevention decrements, not newly desired resting shares. Cancel
+  quantity is the **intended total size**, not shares to remove; zero cancels the
+  remaining balance. Neither encoding operation changes risk reservations.
+- The caller must allocate day-unique, strictly increasing `UserRefNum` values
+  for the logical account and persist them. The encoder checks local field bounds
+  and replacement reference ordering, but has no account-wide allocator or journal.
+  `ClOrdID` is not the retransmission/deduplication key. No `UserRefIdx` is used.
+
+`SoupClient<MaxPacket>` implements an **offline SoupBinTCP 3.00** client state
+machine, not a socket implementation. Production port/version compatibility must
+be confirmed; Soup 4.x extensions are not implemented. Its default inbound frame
+capacity is 1,024 bytes including the length prefix; an oversized frame latches a
+fault, including oversized debug traffic. Tests use synthetic peers, not Nasdaq
+certification or licensed session captures.
+
+- Login requests sequence 1 of the active session. Reconnect on the same object
+  requests its retained session and next successfully applied sequence, never
+  sequence 0/latest. A server response must match exactly; no silent replay skip.
+- Arbitrary TCP fragmentation/coalescing is handled with bounded storage. Only
+  `S` packets advance sequence. Debug and heartbeat packets do not. The application
+  callback must validate/apply each message and return true before sequence moves;
+  its bytes are borrowed only for that call. A callback failure latches a fault;
+  earlier applied messages are not rolled back. Empty payload legality belongs
+  to the application protocol, not Soup framing.
+- Disconnect discards incomplete frames but retains applied sequence. Malformed
+  input, session/sequence mismatch and application failure cannot be cleared by
+  reconnecting. Login rejection and end-of-session also require an explicit
+  higher-level recovery decision; constructing a new client is not reconciliation.
+- `heartbeat_due` uses a one-second idle-send threshold. Call `sent` only after
+  actual positive write progress, not after encoding. Poll the receive watchdog
+  even when no bytes arrive, using a caller-chosen timeout and monotonic clock.
+  Incoming bytes refresh RX liveness; outgoing traffic does not. Timeout closes
+  the logical connection; the caller must close its socket. Clock reversal faults.
+- `frame_order` produces a `U` envelope only when transport is active. That state
+  is **not permission to trade or evidence replay has caught up**. The caller owns
+  risk/recovery gating, stable buffers and partial-write offsets; it must never
+  interleave a heartbeat or another order into a partly written frame. Login frames
+  contain credentials and must not be logged. Heartbeat/logout constants are wire
+  bytes only; they do not perform I/O or release exposure.
+
+There is no OUCH response decoder, order lifecycle/reconciliation, persistent
+checkpoint, request retransmission manager, network driver, or connection to the
+toy engine yet. A TCP write, timeout, disconnect or cancel request never proves
+exchange acceptance or termination. Replaying inbound Soup messages alone cannot
+resolve uncertain outbound requests. Risk must remain reserved until authoritative
+execution/terminal reports and reconciliation resolve it.
 
 ## What is implemented
 
@@ -278,8 +341,9 @@ option whose end-to-end latency must be measured, not inferred from this kernel.
 
 The ITCH single-symbol day-start reference is implemented against synthetic wire
 fixtures. **Licensed-capture equivalence and real recovery remain open**. Follow
-with OUCH encoding and a session/order state machine, reliable execution processing,
-cancel/rate/self-trade controls and persistent reconciliation. Port validated
+the offline OUCH encoder and Soup session reference with an order lifecycle,
+reliable execution processing, cancel/rate/self-trade controls and persistent
+reconciliation. Port validated
 behavior into a complete FPGA pipeline with coherent risk ownership and a final
 transmit gate, then establish hardware timing. Do not let CPU and FPGA independently
 spend the same risk budget.
