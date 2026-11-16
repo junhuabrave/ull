@@ -2,7 +2,7 @@ CXX ?= g++
 CPPFLAGS := -Iinclude
 CXXFLAGS := -std=c++20 -O3 -g -Wall -Wextra -Wconversion -Werror -pthread
 
-.PHONY: all test rtl-test telemetry-test sanitize clean
+.PHONY: all test rtl-test rtl-lint telemetry-test sanitize clean
 all: build/replay build/benchmark build/nasdaq_ingress
 
 build:
@@ -32,9 +32,23 @@ test: build/test_core build/test_moldudp64 build/test_itch build/test_order_entr
 	./build/test_itch
 	./build/test_order_entry
 
-rtl-test: | build
+build/rtl_ingress_vectors: tests/rtl_ingress_vectors.cpp include/ull/nasdaq/moldudp64.hpp include/ull/nasdaq/itch.hpp | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@
+
+build/rtl_ingress_vectors.txt: build/rtl_ingress_vectors
+	./build/rtl_ingress_vectors > $@.tmp && mv $@.tmp $@
+
+build/mold_itch_ingress_tb: rtl/itch_pkg.sv rtl/mold_itch_ingress.sv tests/mold_itch_ingress_tb.sv | build
+	iverilog -g2012 -Wall -s mold_itch_ingress_tb -o $@ $^
+
+rtl-test: build/rtl_ingress_vectors.txt build/mold_itch_ingress_tb | build
 	iverilog -g2012 -Wall -s quote_gate_tb -o build/quote_gate_tb rtl/quote_gate.v tests/quote_gate_tb.sv
 	vvp build/quote_gate_tb
+	vvp build/mold_itch_ingress_tb +vectors=build/rtl_ingress_vectors.txt
+	vvp build/mold_itch_ingress_tb +vectors=build/rtl_ingress_vectors.txt +no_stalls
+
+rtl-lint:
+	verilator --lint-only -Wall --top-module mold_itch_ingress rtl/itch_pkg.sv rtl/mold_itch_ingress.sv
 
 telemetry-test: build/replay
 	.venv/bin/python -m unittest discover -s tests -p 'test_telemetry.py' -v
@@ -48,6 +62,8 @@ sanitize: | build
 	./build/test_itch_sanitize
 	$(CXX) $(CPPFLAGS) -std=c++20 -O1 -g -Wall -Wextra -pthread -fsanitize=address,undefined -fno-omit-frame-pointer tests/test_order_entry.cpp -o build/test_order_entry_sanitize
 	./build/test_order_entry_sanitize
+	$(CXX) $(CPPFLAGS) -std=c++20 -O1 -g -Wall -Wextra -pthread -fsanitize=address,undefined -fno-omit-frame-pointer tests/rtl_ingress_vectors.cpp -o build/rtl_vectors_sanitize
+	./build/rtl_vectors_sanitize > /dev/null
 
 clean:
 	rm -rf build
