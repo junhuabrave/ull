@@ -46,6 +46,7 @@ Sources: [Nasdaq ITCH specification](https://www.nasdaqtrader.com/content/techni
 ## Run locally
 
 Requires Linux, GCC with C++20, Make, Python 3.10+, and Icarus Verilog for RTL tests.
+The optional `make rtl-lint` target requires Verilator (validated with 5.032).
 The C++ binaries have no third-party runtime dependencies. The compiler barriers
 in the measurement harness use GCC/Clang syntax.
 
@@ -209,6 +210,69 @@ exchange acceptance or termination. Replaying inbound Soup messages alone cannot
 resolve uncertain outbound requests. Risk must remain reserved until authoritative
 execution/terminal reports and reconciliation resolve it.
 
+### SystemVerilog streaming feed reference
+
+`rtl/mold_itch_ingress.sv` accepts a **64-bit UDP-payload stream**, frames MoldUDP64,
+checks channel sequencing and decodes ITCH into the packed `itch_event_t` in
+`rtl/itch_pkg.sv`. It is separate from the advisory quote gate. This is executable
+RTL with a C++-checked simulation, not a board bitstream or a complete FPGA book.
+
+- Lane zero (`s_data[7:0]`) carries the earliest wire byte. Input transfers only
+  on `s_valid && s_ready`. Non-final beats require `s_keep=ff`; the final beat
+  requires a nonzero contiguous low-bit mask. `s_last` ends exactly one UDP
+  payload. The next accepted beat starts another; Ethernet/IP/UDP headers are
+  not part of this interface.
+- An upstream checker must supply `s_integrity_ok` on the final beat, covering
+  the required link/network integrity checks. The module does **not** calculate
+  Ethernet CRCs, validate IP/UDP headers/checksums, or detect a missing EOF. A
+  stalled/truncated upstream stream needs an external watchdog and recovery.
+- Parsing proceeds while bytes arrive, but decoded events stay in bounded
+  staging memory until the **whole datagram** passes framing, integrity, sequence
+  and ITCH validation. A bad final message suppresses all earlier staged events.
+  Output advances only on `m_valid && m_ready` and stays stable under backpressure.
+- Explicit `arm` supplies the trusted 10-byte session and next channel sequence.
+  Duplicate/overlapping prefixes are suppressed; their Mold framing is still
+  checked. Only newly delivered ITCH payloads are decoded. Heartbeats and end
+  markers follow the C++ transport contract, including stale-control suppression.
+  Malformed input, integrity failure, session mismatch, gaps, invalid ITCH and
+  capacity exhaustion latch the receiver off until explicit recovery.
+- `status_valid` pulses at accepted EOF, with the result in `status`.
+  `next_sequence` advances only after a complete valid packet has been staged,
+  **not after the downstream book applies it**. Neither `armed` nor this staging
+  checkpoint is book readiness or permission to trade. A downstream semantic
+  failure must invalidate the book and trigger supervised recovery.
+- Synchronous reset or arm discards partial input and queued output and inhibits
+  both handshakes while asserted. The owner must flush the remainder of the
+  upstream datagram too, and coordinate the book checkpoint. Replaying from the
+  module's staging checkpoint after discarding unapplied events would lose data.
+
+The default bounds are 2,048 UDP-payload bytes and 128 new events per packet.
+Only positive capacities are supported. This **single-bank** reference accepts
+eight bytes per cycle during input but blocks new packets while output drains.
+It is not a sustained 10 GbE receiver: a real MAC cannot backpressure the wire.
+Production work still needs ingress queues, overflow invalidation, bank/pipeline
+design, resource mapping, synthesis and timing closure. The eight-byte combinational
+parse chain has no demonstrated target clock frequency. No hardware latency is
+claimed from testbench clock periods.
+
+The RTL matches the C++ decoder's consumed-field checks and partial handling of
+known non-book types; it does not perform order-book transitions, directory
+mapping, freshness checks, regulatory authorization or risk reservation. Prices
+remain price4, quantities remain shares, timestamps remain nanoseconds since
+midnight, and sequence numbers identify channel messages, not per-symbol epochs.
+
+`make rtl-test` compiles a C++ fixture generator using the actual `MoldReceiver`
+and `decode_itch` reference APIs, then compares every emitted field, status and
+checkpoint in SystemVerilog. It runs 3,602 packet cases and checks 4,099 emitted
+events in each of two modes: input bubbles/output stalls, and unstalled transfers.
+Four additional staged events are deliberately aborted by reset/rearm. Coverage
+includes every supported message type, every packet truncation, byte mutations,
+duplicate/overlap delivery, invalid final messages, integrity failures, narrow
+test-buffer boundaries, sequence overflow and reset/rearm during partial input
+or stalled output. These are synthetic protocol tests, not licensed-capture or
+exchange certification tests. `make rtl-lint` checks the default RTL parameters
+with Verilator; simulation uses smaller buffers to exercise capacity boundaries.
+
 ## What is implemented
 
 - A single-owner C++20 engine with fixed storage, integer arithmetic, no hot-path
@@ -232,7 +296,8 @@ execution/terminal reports and reconciliation resolve it.
 - A one-register-stage Verilog candidate gate with widened arithmetic, version
   tags, and packet/sequence/freshness/kill inputs. It has a simulation testbench.
   It is **not** the complete C++ engine in hardware: no reservations, accounting,
-  sequence recovery, packet parser, MAC, session state, encoder or transmitter.
+  sequence recovery, MAC, order-session state, encoder or transmitter. The separate
+  SystemVerilog feed decoder above is not yet connected to a hardware book or gate.
 
 ### Safety contracts
 
@@ -347,6 +412,10 @@ reconciliation. Port validated
 behavior into a complete FPGA pipeline with coherent risk ownership and a final
 transmit gate, then establish hardware timing. Do not let CPU and FPGA independently
 spend the same risk budget.
+
+The SystemVerilog feed decoder is now checked against the C++ wire reference.
+Its next hardware milestones are a bounded book-update pipeline and a buffered
+ingress design that can tolerate declared feed bursts without stalling the MAC.
 
 The RTL candidate output has no ready/valid backpressure handshake: each valid
 cycle is one advisory candidate that may be discarded. It must never connect
